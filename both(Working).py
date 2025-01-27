@@ -239,7 +239,7 @@ def main():
     init_db()
 
     # Bot setup
-    application = Application.builder().token("7517397372:AAGsNzeo_SAKdnNTRVhmHhaSFK7ViZ6PIvU").build()
+    application = Application.builder().token("token").build()
 
     # Handlers
     conversation_handler = ConversationHandler(

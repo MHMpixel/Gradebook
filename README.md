@@ -11,4 +11,4 @@ Teacher Features
 • Enter student grades manually or upload them using a CSV file.
 • Can see the grades of all students of the course in detail.
 
-Help im Stuck :(
+

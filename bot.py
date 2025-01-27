@@ -107,7 +107,7 @@ def main():
         init_db()
 
         # Create the bot application
-        application = Application.builder().token("YOUR_BOT_TOKEN").build()
+        application = Application.builder().token("token").build()
 
         # Conversation handler to ask for the college ID
         conversation_handler = ConversationHandler(

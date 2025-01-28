@@ -46,12 +46,6 @@ def init_db():
             )
             """)
             cursor.execute("""
-            CREATE TABLE IF NOT EXISTS grading_logic (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                description TEXT NOT NULL
-            )
-            """)
-            cursor.execute("""
             CREATE TABLE IF NOT EXISTS detailed_grades (
                 student_id TEXT NOT NULL,
                 subject TEXT NOT NULL,
@@ -60,9 +54,25 @@ def init_db():
                 midterm REAL,
                 final REAL,
                 attendance REAL,
+                overall REAL,
                 PRIMARY KEY (student_id, subject)
             )
             """)
+
+            # Check if the columns exist
+            cursor.execute("PRAGMA table_info(detailed_grades)")
+            columns = cursor.fetchall()
+            column_names = [column[1] for column in columns]
+            if "overall" not in column_names:
+                cursor.execute("ALTER TABLE detailed_grades ADD COLUMN overall REAL")
+
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS grading_logic (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                description TEXT
+            )
+            """)
+
             users = [
                 ("1", "1", "student"),
                 ("2", "2", "student"),
@@ -107,17 +117,18 @@ def is_teacher(user_id):
             conn.close()
     return False
 
-# Function to add a grade
-def add_grade_to_db(student_id, subject, grade):
+# Function to add detailed grade components to the database
+def add_detailed_grade_to_db(student_id, subject, homework, quizzes, midterm, final, attendance, overall):
     conn = db_connection()
     if conn:
         try:
             cursor = conn.cursor()
-            cursor.execute("INSERT OR REPLACE INTO grades (student_id, subject, grade) VALUES (?, ?, ?)", (student_id, subject, grade))
+            cursor.execute("INSERT OR REPLACE INTO detailed_grades (student_id, subject, homework, quizzes, midterm, final, attendance, overall) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
+                           (student_id, subject, homework, quizzes, midterm, final, attendance, overall))
             conn.commit()
-            logger.info(f"Grade added for student {student_id}: {subject} - {grade}")
+            logger.info(f"Detailed grades added for student {student_id}: {subject} - Homework: {homework}, Quizzes: {quizzes}, Midterm: {midterm}, Final: {final}, Attendance: {attendance}, Overall: {overall}")
         except sqlite3.Error as e:
-            logger.error(f"Error adding grade for {student_id}: {e}")
+            logger.error(f"Error adding detailed grades for {student_id}: {e}")
         finally:
             conn.close()
 
@@ -144,7 +155,7 @@ def get_detailed_grades_for_student(student_id):
     if conn:
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT subject, homework, quizzes, midterm, final, attendance FROM detailed_grades WHERE student_id = ?", (student_id,))
+            cursor.execute("SELECT subject, homework, quizzes, midterm, final, attendance, overall FROM detailed_grades WHERE student_id = ?", (student_id,))
             grades = cursor.fetchall()
             logger.info(f"Detailed grades fetched for student {student_id}: {grades}")
             return grades
@@ -186,6 +197,30 @@ def define_grading_logic(description):
         finally:
             conn.close()
 
+# Function to reset grades and grading logic
+async def reset(update: Update, context: CallbackContext):
+    user_id = str(update.message.from_user.id)
+
+    if not is_teacher(user_id):
+        await update.message.reply_text("You are not authorized to reset grades and grading logic.")
+        return
+
+    conn = db_connection()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM grades")
+            cursor.execute("DELETE FROM detailed_grades")
+            cursor.execute("DELETE FROM grading_logic")
+            conn.commit()
+            logger.info("Grades and grading logic reset successfully.")
+            await update.message.reply_text("Grades and grading logic have been reset.")
+        except sqlite3.Error as e:
+            logger.error(f"Error resetting grades and grading logic: {e}")
+            await update.message.reply_text("Error resetting grades and grading logic.")
+        finally:
+            conn.close()
+
 # Function to fetch grading logic
 def get_grading_logic():
     conn = db_connection()
@@ -195,6 +230,8 @@ def get_grading_logic():
             cursor.execute("SELECT description FROM grading_logic")
             logic = cursor.fetchall()
             logger.info(f"Grading logic fetched: {logic}")
+            if not logic:
+                logger.info("No grading logic found in the database.")
             return logic
         except sqlite3.Error as e:
             logger.error(f"Error fetching grading logic: {e}")
@@ -208,11 +245,12 @@ async def show_commands(role):
     if role == "teacher":
         return """
 Available commands for teachers:
-/add_grade <student_college_id> <subject> <grade> - Add a grade for a student.
+/add_grade <student_college_id> <subject> <homework> <quizzes> <midterm> <final> <attendance> <overall> - Add a grade for a student.
 /upload_grades <csv_file_path> - Upload grades from a CSV file.
 /view_all_grades - View all grades.
 /grading_logic <description> - Define grading logic.
 /view_grading_logic - View current grading logic.
+/reset - Reset grades and grading logic for all students.
 /logout - Log out.
 """
     else:  # role is "student"
@@ -264,7 +302,7 @@ async def logout(update: Update, context: CallbackContext):
     else:
         await update.message.reply_text("You are not logged in.")
 
-# Teacher: Add Grade
+# Teacher: Add Grade (continued)
 async def add_grade(update: Update, context: CallbackContext):
     user_id = str(update.message.from_user.id)
 
@@ -272,15 +310,27 @@ async def add_grade(update: Update, context: CallbackContext):
         await update.message.reply_text("You are not authorized to add grades.")
         return
 
-    if len(context.args) < 3:
-        await update.message.reply_text("Usage: /add_grade <student_college_id> <subject> <grade>")
+    # Check if grading logic is defined
+    logic = get_grading_logic()
+    if not logic:
+        await update.message.reply_text("Please set a grading logic before adding grades.")
         return
 
-    student_id, subject, grade = context.args[0], context.args[1], context.args[2]
+    if len(context.args) < 8:  # Requires at least 7 grading components plus the overall grade
+        await update.message.reply_text("Usage: /add_grade <student_college_id> <subject> <homework> <quizzes> <midterm> <final> <attendance> <overall>")
+        return
+
+    student_id, subject, homework, quizzes, midterm, final, attendance, overall = context.args[0], context.args[1], context.args[2], context.args[3], context.args[4], context.args[5], context.args[6], context.args[7]
+    
     try:
-        grade = float(grade)
+        homework = float(homework)
+        quizzes = float(quizzes)
+        midterm = float(midterm)
+        final = float(final)
+        attendance = float(attendance)
+        overall = float(overall)
     except ValueError:
-        await update.message.reply_text("Invalid grade. Please provide a number.")
+        await update.message.reply_text("Invalid grade. Please provide numbers for all grading components.")
         return
 
     # Check if student exists
@@ -295,8 +345,9 @@ async def add_grade(update: Update, context: CallbackContext):
             await update.message.reply_text(f"Student with college ID {student_id} not found.")
             return
 
-        add_grade_to_db(student_id, subject, grade)
-        await update.message.reply_text(f"Grade added: {student_id}, {subject} - {grade}")
+        # Add detailed grades and overall grade
+        add_detailed_grade_to_db(student_id, subject, homework, quizzes, midterm, final, attendance, overall)
+        await update.message.reply_text(f"Grades added: {student_id}, {subject} - Homework: {homework}, Quizzes: {quizzes}, Midterm: {midterm}, Final: {final}, Attendance: {attendance}, Overall: {overall}")
 
 # Teacher: Define Grading Logic
 async def grading_logic(update: Update, context: CallbackContext):
@@ -332,12 +383,17 @@ async def upload_grades(update: Update, context: CallbackContext):
         with open(csv_file_path, newline='') as csvfile:
             reader = csv.reader(csvfile)
             for row in reader:
-                student_id, subject, grade = row
+                student_id, subject, homework, quizzes, midterm, final, attendance, overall = row
                 try:
-                    grade = float(grade)
-                    add_grade_to_db(student_id, subject, grade)
+                    homework = float(homework)
+                    quizzes = float(quizzes)
+                    midterm = float(midterm)
+                    final = float(final)
+                    attendance = float(attendance)
+                    overall = float(overall)
+                    add_detailed_grade_to_db(student_id, subject, homework, quizzes, midterm, final, attendance, overall)
                 except ValueError:
-                    logger.error(f"Invalid grade value in CSV: {grade}")
+                    logger.error(f"Invalid grade value in CSV: {row}")
         await update.message.reply_text(f"Grades uploaded from {csv_file_path}")
     except Exception as e:
         logger.error(f"Error reading CSV file {csv_file_path}: {e}")
@@ -355,10 +411,16 @@ async def view_all_grades(update: Update, context: CallbackContext):
     if conn:
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT student_id, subject, grade FROM grades")
+            cursor.execute("SELECT student_id, subject, homework, quizzes, midterm, final, attendance, overall FROM detailed_grades")
             grades = cursor.fetchall()
-            grade_list = "\n".join([f"Student ID: {student_id}, {subject}: {grade}" for student_id, subject, grade in grades])
-            await update.message.reply_text(f"All grades:\n{grade_list}")
+            if not grades:
+                await update.message.reply_text("No grades found.")
+                logger.info("No grades found in the database.")
+            else:
+                grade_list = ""
+                for student_id, subject, homework, quizzes, midterm, final, attendance, overall in grades:
+                    grade_list += f"Student ID: {student_id}\nSubject: {subject}\nHomework: {homework}\nQuizzes: {quizzes}\nMidterm: {midterm}\nFinal: {final}\nAttendance: {attendance}\nOverall: {overall}\n\n"
+                await update.message.reply_text(f"All grades:\n{grade_list}")
         except sqlite3.Error as e:
             logger.error(f"Error fetching all grades: {e}")
             await update.message.reply_text("Error fetching all grades.")
@@ -378,14 +440,24 @@ async def view_grades(update: Update, context: CallbackContext):
         await update.message.reply_text("You are not authorized to view grades.")
         return
 
-    grades = get_grades_for_student(college_id)
-
-    if not grades:
-        await update.message.reply_text("No grades found.")
-    else:
-        grade_list = "\n".join([f"{subject}: {grade}" for subject, grade in grades])
-        await update.message.reply_text(f"Your grades:\n{grade_list}")
-
+    conn = db_connection()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT overall FROM detailed_grades WHERE student_id = ?", (college_id,))
+            grades = cursor.fetchall()
+            logger.info(f"Grades fetched for student {college_id}: {grades}")
+            if not grades:
+                await update.message.reply_text("No grades found.")
+            else:
+                grade_list = "\n".join([f"Overall: {grade[0]}" for grade in grades])
+                await update.message.reply_text(f"Your overall grade:\n{grade_list}")
+        except sqlite3.Error as e:
+            logger.error(f"Error fetching grades for student {college_id}: {e}")
+            await update.message.reply_text("Error fetching your grades.")
+        finally:
+            conn.close()
+            
 # Student: View Detailed Grades
 async def view_detailed_grades(update: Update, context: CallbackContext):
     user_id = str(update.message.from_user.id)
@@ -399,31 +471,58 @@ async def view_detailed_grades(update: Update, context: CallbackContext):
         await update.message.reply_text("You are not authorized to view grades.")
         return
 
-    grades = get_detailed_grades_for_student(college_id)
-
-    if not grades:
-        await update.message.reply_text("No grades found.")
-    else:
-        grade_list = "\n".join([f"{subject}: Homework - {homework}, Quizzes - {quizzes}, Midterm - {midterm}, Final - {final}, Attendance - {attendance}" for subject, homework, quizzes, midterm, final, attendance in grades])
-        await update.message.reply_text(f"Your detailed grades:\n{grade_list}")
+    conn = db_connection()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT subject, homework, quizzes, midterm, final, attendance, overall FROM detailed_grades WHERE student_id = ?", (college_id,))
+            grades = cursor.fetchall()
+            logger.info(f"Detailed grades fetched for student {college_id}: {grades}")
+            if not grades:
+                await update.message.reply_text("No grades found.")
+            else:
+                grade_list = "\n".join([f"Subject: {subject}, Homework: {homework}, Quizzes: {quizzes}, Midterm: {midterm}, Final: {final}, Attendance: {attendance}, Overall: {overall}" for subject, homework, quizzes, midterm, final, attendance, overall in grades])
+                await update.message.reply_text(f"Your detailed grades:\n{grade_list}")
+        except sqlite3.Error as e:
+            logger.error(f"Error fetching detailed grades for student {college_id}: {e}")
+            await update.message.reply_text("Error fetching your detailed grades.")
+        finally:
+            conn.close()
 
 # Student/Teacher: View Grading Logic
 async def view_grading_logic(update: Update, context: CallbackContext):
+    user_id = str(update.message.from_user.id)
     logic = get_grading_logic()
 
     if not logic:
         await update.message.reply_text("No grading logic defined yet.")
+        logger.info(f"No grading logic found for user {user_id}.")
+        await update.message.reply_text("Test message: No logic found.")
     else:
-        logic_list = "\n".join([f"{desc}" for desc in logic])
-        await update.message.reply_text(f"Current grading logic:\n{logic_list}")
+        # Flatten the list of tuples to a list of strings
+        logic_list = [desc[0] for desc in logic]
+        logger.info(f"Constructed logic list: {logic_list}")
 
+        # Join the list into a single string
+        logic_text = "\n".join(logic_list)
+        logger.info(f"Constructed logic text: {logic_text}")
+        await update.message.reply_text("Test message: Logic found.")
+        
+        # Check if the logic_text is empty or None
+        if not logic_text:
+            await update.message.reply_text("No grading logic found or unable to construct the list.")
+            logger.error(f"Failed to construct logic text for user {user_id}.")
+        else:
+            await update.message.reply_text(f"Current grading logic:\n{logic_text}")
+            logger.info(f"Grading logic sent to user {user_id}: {logic_text}")
+            
 # Main: Start bot
 def main():
     # Initialize database
     init_db()
 
     # Bot setup
-    application = Application.builder().token("token").build()
+    application = Application.builder().token("7517397372:AAGsNzeo_SAKdnNTRVhmHhaSFK7ViZ6PIvU").build()
 
     # Handlers
     conversation_handler = ConversationHandler(
@@ -439,7 +538,8 @@ def main():
     application.add_handler(CommandHandler("view_grades", view_grades))
     application.add_handler(CommandHandler("view_detailed_grades", view_detailed_grades))
     application.add_handler(CommandHandler("grading_logic", grading_logic))
-    application.add_handler(CommandHandler("view_grading_logic", view_grading_logic))
+    application.add_handler(CommandHandler("view_grading_logic", view_grading_logic))  # Add this line
+    application.add_handler(CommandHandler("reset", reset))
 
     # Run bot
     application.run_polling()

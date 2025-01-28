@@ -1,5 +1,6 @@
 import sqlite3
 import logging
+import csv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, ConversationHandler
 
@@ -42,6 +43,12 @@ def init_db():
                 subject TEXT NOT NULL,
                 grade REAL NOT NULL,
                 PRIMARY KEY (student_id, subject)
+            )
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS grading_logic (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                description TEXT NOT NULL
             )
             """)
             users = [
@@ -136,6 +143,38 @@ def get_college_id(user_id):
             conn.close()
     return None
 
+# Function to define grading logic
+def define_grading_logic(description):
+    conn = db_connection()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO grading_logic (description) VALUES (?)", (description,))
+            conn.commit()
+            logger.info("Grading logic defined successfully.")
+        except sqlite3.Error as e:
+            logger.error(f"Error defining grading logic: {e}")
+        finally:
+            conn.close()
+
+# Command: Show Available Commands
+async def show_commands(role):
+    if role == "teacher":
+        return """
+Available commands for teachers:
+/add_grade <student_college_id> <subject> <grade> - Add a grade for a student.
+/upload_grades <csv_file_path> - Upload grades from a CSV file.
+/view_all_grades - View all grades.
+/grading_logic <description> - Define grading logic.
+/logout - Log out.
+"""
+    else:  # role is "student"
+        return """
+Available commands for students:
+/view_grades - View your grades.
+/logout - Log out.
+"""
+
 # Command: Start and prompt for college ID
 async def start(update: Update, context: CallbackContext):
     user_id = str(update.message.from_user.id)
@@ -163,10 +202,8 @@ async def college_id(update: Update, context: CallbackContext):
     add_user(user_id, college_id, role)
     LOGGED_IN[user_id] = (college_id, role)
 
-    if role == "teacher":
-        await update.message.reply_text("College ID verified! You are logged in as a teacher. Use /add_grade to add grades.")
-    else:
-        await update.message.reply_text("College ID verified! You are logged in as a student. Use /view_grades to see your grades.")
+    commands = await show_commands(role)
+    await update.message.reply_text(f"College ID verified! You are logged in as a {role}.\n{commands}")
     return ConversationHandler.END
 
 # Command: Logout
@@ -212,6 +249,69 @@ async def add_grade(update: Update, context: CallbackContext):
         add_grade_to_db(student_id, subject, grade)
         await update.message.reply_text(f"Grade added: {student_id}, {subject} - {grade}")
 
+# Teacher: Define Grading Logic
+async def grading_logic(update: Update, context: CallbackContext):
+    user_id = str(update.message.from_user.id)
+
+    if not is_teacher(user_id):
+        await update.message.reply_text("You are not authorized to define grading logic.")
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text("Usage: /grading_logic <description>")
+        return
+
+    description = " ".join(context.args)
+    define_grading_logic(description)
+    await update.message.reply_text("Grading logic defined.")
+
+# Teacher: Upload Grades from CSV
+async def upload_grades(update: Update, context: CallbackContext):
+    user_id = str(update.message.from_user.id)
+
+    if not is_teacher(user_id):
+                await update.message.reply_text("Usage: /upload_grades <csv_file_path>")
+                return
+
+    csv_file_path = context.args[0]
+
+    try:
+        with open(csv_file_path, newline='') as csvfile:
+            reader = csv.reader(csvfile)
+            for row in reader:
+                student_id, subject, grade = row
+                try:
+                    grade = float(grade)
+                    add_grade_to_db(student_id, subject, grade)
+                except ValueError:
+                    logger.error(f"Invalid grade value in CSV: {grade}")
+        await update.message.reply_text(f"Grades uploaded from {csv_file_path}")
+    except Exception as e:
+        logger.error(f"Error reading CSV file {csv_file_path}: {e}")
+        await update.message.reply_text(f"Error uploading grades from {csv_file_path}")
+
+# Teacher: View All Grades
+async def view_all_grades(update: Update, context: CallbackContext):
+    user_id = str(update.message.from_user.id)
+
+    if not is_teacher(user_id):
+        await update.message.reply_text("You are not authorized to view all grades.")
+        return
+
+    conn = db_connection()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT student_id, subject, grade FROM grades")
+            grades = cursor.fetchall()
+            grade_list = "\n".join([f"Student ID: {student_id}, {subject}: {grade}" for student_id, subject, grade in grades])
+            await update.message.reply_text(f"All grades:\n{grade_list}")
+        except sqlite3.Error as e:
+            logger.error(f"Error fetching all grades: {e}")
+            await update.message.reply_text("Error fetching all grades.")
+        finally:
+            conn.close()
+
 # Student: View Grades (updated)
 async def view_grades(update: Update, context: CallbackContext):
     user_id = str(update.message.from_user.id)
@@ -239,7 +339,7 @@ def main():
     init_db()
 
     # Bot setup
-    application = Application.builder().token("token").build()
+    application = Application.builder().token("7517397372:AAGsNzeo_SAKdnNTRVhmHhaSFK7ViZ6PIvU").build()
 
     # Handlers
     conversation_handler = ConversationHandler(
@@ -250,7 +350,10 @@ def main():
     application.add_handler(conversation_handler)
     application.add_handler(CommandHandler("logout", logout))
     application.add_handler(CommandHandler("add_grade", add_grade))
+    application.add_handler(CommandHandler("upload_grades", upload_grades))
+    application.add_handler(CommandHandler("view_all_grades", view_all_grades))
     application.add_handler(CommandHandler("view_grades", view_grades))
+    application.add_handler(CommandHandler("grading_logic", grading_logic))
 
     # Run bot
     application.run_polling()
